@@ -47,12 +47,22 @@ contract PantherJungleInitializable is Ownable, ReentrancyGuard {
     // The staked token
     IBEP20 public stakedToken;
 
+    // The transfer fee (in basis points) of staked token
+    uint16 public stakedTokenTransferFee;
+
+    // The withdrawal interval
+    uint256 public withdrawalInterval;
+
+    // Max withdrawal interval: 30 days.
+    uint256 public constant MAXIMUM_WITHDRAWAL_INTERVAL = 30 days;
+
     // Info of each user that stakes tokens (stakedToken)
     mapping(address => UserInfo) public userInfo;
 
     struct UserInfo {
         uint256 amount; // How many staked tokens the user has provided
         uint256 rewardDebt; // Reward debt
+        uint256 nextWithdrawalUntil; // When can the user withdraw again.
     }
 
     event AdminTokenRecovery(address tokenRecovered, uint256 amount);
@@ -63,6 +73,8 @@ contract PantherJungleInitializable is Ownable, ReentrancyGuard {
     event NewPoolLimit(uint256 poolLimitPerUser);
     event RewardsStop(uint256 blockNumber);
     event Withdraw(address indexed user, uint256 amount);
+    event NewStakedTokenTransferFee(uint16 transferFee);
+    event NewWithdrawalInterval(uint256 interval);
 
     constructor() public {
         PANTHER_JUNGLE_FACTORY = msg.sender;
@@ -76,6 +88,8 @@ contract PantherJungleInitializable is Ownable, ReentrancyGuard {
      * @param _startBlock: start block
      * @param _bonusEndBlock: end block
      * @param _poolLimitPerUser: pool limit per user in stakedToken (if any, else 0)
+     * @param _stakedTokenTransferFee: the transfer fee of stakedToken (if any, else 0)
+     * @param _withdrawalInterval: the withdrawal interval for stakedToken (if any, else 0)
      * @param _admin: admin address with ownership
      */
     function initialize(
@@ -85,10 +99,13 @@ contract PantherJungleInitializable is Ownable, ReentrancyGuard {
         uint256 _startBlock,
         uint256 _bonusEndBlock,
         uint256 _poolLimitPerUser,
+        uint16 _stakedTokenTransferFee,
+        uint256 _withdrawalInterval,
         address _admin
     ) external {
         require(!isInitialized, "Already initialized");
         require(msg.sender == PANTHER_JUNGLE_FACTORY, "Not factory");
+        require(_withdrawalInterval <= MAXIMUM_WITHDRAWAL_INTERVAL, "Invalid withdrawal interval");
 
         // Make this contract initialized
         isInitialized = true;
@@ -98,6 +115,8 @@ contract PantherJungleInitializable is Ownable, ReentrancyGuard {
         rewardPerBlock = _rewardPerBlock;
         startBlock = _startBlock;
         bonusEndBlock = _bonusEndBlock;
+        stakedTokenTransferFee = _stakedTokenTransferFee;
+        withdrawalInterval = _withdrawalInterval;
 
         if (_poolLimitPerUser > 0) {
             hasUserLimit = true;
@@ -133,12 +152,21 @@ contract PantherJungleInitializable is Ownable, ReentrancyGuard {
             uint256 pending = user.amount.mul(accTokenPerShare).div(PRECISION_FACTOR).sub(user.rewardDebt);
             if (pending > 0) {
                 rewardToken.safeTransfer(address(msg.sender), pending);
+                user.nextWithdrawalUntil = block.timestamp.add(withdrawalInterval);
             }
         }
 
         if (_amount > 0) {
-            user.amount = user.amount.add(_amount);
             stakedToken.safeTransferFrom(address(msg.sender), address(this), _amount);
+            if (stakedTokenTransferFee > 0) {
+                uint256 transferFee = _amount.mul(stakedTokenTransferFee).div(10000);
+                _amount = _amount.sub(transferFee);
+            }
+            user.amount = user.amount.add(_amount);
+
+            if (user.nextWithdrawalUntil == 0) {
+                user.nextWithdrawalUntil = block.timestamp.add(withdrawalInterval);
+            }
         }
 
         user.rewardDebt = user.amount.mul(accTokenPerShare).div(PRECISION_FACTOR);
@@ -153,6 +181,7 @@ contract PantherJungleInitializable is Ownable, ReentrancyGuard {
     function withdraw(uint256 _amount) external nonReentrant {
         UserInfo storage user = userInfo[msg.sender];
         require(user.amount >= _amount, "Amount to withdraw too high");
+        require(user.nextWithdrawalUntil <= block.timestamp, "Withdrawal locked");
 
         _updatePool();
 
@@ -165,6 +194,7 @@ contract PantherJungleInitializable is Ownable, ReentrancyGuard {
 
         if (pending > 0) {
             rewardToken.safeTransfer(address(msg.sender), pending);
+            user.nextWithdrawalUntil = block.timestamp.add(withdrawalInterval);
         }
 
         user.rewardDebt = user.amount.mul(accTokenPerShare).div(PRECISION_FACTOR);
@@ -178,9 +208,12 @@ contract PantherJungleInitializable is Ownable, ReentrancyGuard {
      */
     function emergencyWithdraw() external nonReentrant {
         UserInfo storage user = userInfo[msg.sender];
+        require(user.nextWithdrawalUntil <= block.timestamp, "Withdrawal locked");
+
         uint256 amountToTransfer = user.amount;
         user.amount = 0;
         user.rewardDebt = 0;
+        user.nextWithdrawalUntil = 0;
 
         if (amountToTransfer > 0) {
             stakedToken.safeTransfer(address(msg.sender), amountToTransfer);
@@ -270,6 +303,28 @@ contract PantherJungleInitializable is Ownable, ReentrancyGuard {
     }
 
     /*
+     * @notice Update staked token transfer fee
+     * @dev Only callable by owner.
+     * @param _transferFee: the transfer fee of staked token
+     */
+    function updateStakedTokenTransferFee(uint16 _transferFee) external onlyOwner {
+        require(_transferFee < 10000, "Invalid transfer fee of staked token");
+        stakedTokenTransferFee = _transferFee;
+        emit NewStakedTokenTransferFee(_transferFee);
+    }
+
+    /*
+     * @notice Update the withdrawal interval
+     * @dev Only callable by owner.
+     * @param _interval: the withdrawal interval for staked token in seconds
+     */
+    function updateWithdrawalInterval(uint256 _interval) external onlyOwner {
+        require(_interval <= MAXIMUM_WITHDRAWAL_INTERVAL, "Invalid withdrawal interval");
+        withdrawalInterval = _interval;
+        emit NewWithdrawalInterval(_interval);
+    }
+
+    /*
      * @notice View function to see pending reward on frontend.
      * @param _user: user address
      * @return Pending reward for a given user
@@ -286,6 +341,12 @@ contract PantherJungleInitializable is Ownable, ReentrancyGuard {
         } else {
             return user.amount.mul(accTokenPerShare).div(PRECISION_FACTOR).sub(user.rewardDebt);
         }
+    }
+
+    // View function to see if user can withdraw staked token.
+    function canWithdraw(address _user) external view returns (bool) {
+        UserInfo storage user = userInfo[_user];
+        return block.timestamp >= user.nextWithdrawalUntil;
     }
 
     /*

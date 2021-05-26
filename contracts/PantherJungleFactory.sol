@@ -21,6 +21,8 @@ contract PantherJungleFactory is Ownable {
      * @param _startBlock: start block
      * @param _endBlock: end block
      * @param _poolLimitPerUser: pool limit per user in stakedToken (if any, else 0)
+     * @param _stakedTokenTransferFee: the transfer fee of stakedToken (if any, else 0)
+     * @param _withdrawalInterval: the withdrawal interval for stakedToken (if any, else 0)
      * @param _admin: admin address with ownership
      * @return address of new panther jungle contract
      */
@@ -31,6 +33,8 @@ contract PantherJungleFactory is Ownable {
         uint256 _startBlock,
         uint256 _bonusEndBlock,
         uint256 _poolLimitPerUser,
+        uint16 _stakedTokenTransferFee,
+        uint256 _withdrawalInterval,
         address _admin
     ) external onlyOwner {
         require(_stakedToken.totalSupply() >= 0);
@@ -52,6 +56,8 @@ contract PantherJungleFactory is Ownable {
             _startBlock,
             _bonusEndBlock,
             _poolLimitPerUser,
+            _stakedTokenTransferFee,
+            _withdrawalInterval,
             _admin
         );
 
